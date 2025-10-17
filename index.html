@@ -1,50 +1,450 @@
-// --- Apps Script (Code.gs) ---
-const SHARED_TOKEN = 'YOUR_SECRET_TOKEN';  // フロントと共有する簡易トークン
-const CALENDAR_ID  = 'primary';            // 既定カレンダー
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>タスクカレンダー v7（GCal＋通知＋進捗）</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  body { font-family: "Segoe UI", sans-serif; margin: 10px; background: #f9f9f9; }
+  h2 { text-align: center; }
+  #nav { display: flex; justify-content: space-between; align-items: center; margin: 5px 0; flex-wrap: wrap; }
+  table { border-collapse: collapse; width: 100%; table-layout: fixed; }
+  th, td { border: 1px solid #ccc; width: 14.28%; vertical-align: top; height: 110px; position: relative; background: #fff; cursor: pointer; }
+  th { background: #f1f1f1; }
+  td[data-today="true"] { background: #fffbe0; }
+  .date-number { position: absolute; top: 4px; right: 4px; font-size: 12px; color: #555; }
+  .title { margin: 4px 2px 2px; padding: 3px 6px; border-radius: 6px; font-size: 12px; color: #fff; cursor: pointer; display:flex; justify-content:space-between; align-items:center; gap:6px;}
+  .title .progress { flex:1; height:6px; background: rgba(255,255,255,.35); border-radius: 4px; overflow:hidden; margin-left:6px;}
+  .title .progress > span { display:block; height:100%; background:#fff; }
+  .task-list { margin: 6px 6px 8px 10px; font-size: 11px; display: none; }
+  .task-item { display: grid; grid-template-columns: 18px 1fr auto; align-items: center; gap:6px; margin: 2px 0; }
+  .task-item.done span { text-decoration: line-through; color: gray; }
+  .task-when { font-size:10px; color:#666; }
+  .add-subtask { margin-top: 6px; display:flex; gap:4px; align-items:center; flex-wrap:wrap;}
+  .add-subtask input[type="text"] { width: 48%; font-size: 11px; padding: 4px; }
+  .add-subtask input[type="datetime-local"] { font-size: 11px; padding: 4px; }
+  .add-subtask button { font-size: 11px; padding: 4px 8px; }
+  .color-dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; margin-right: 5px; vertical-align: middle; }
+  .pill { font-size:10px; padding:2px 6px; border-radius:999px; background:rgba(0,0,0,.18); color:#fff; }
 
-function doPost(e) {
-  try {
-    const body = JSON.parse(e.postData.contents);
-    if (body.token !== SHARED_TOKEN) return ContentService.createTextOutput('forbidden').setMimeType(ContentService.MimeType.TEXT);
-    const action = body.action;
-    if (action === 'create') {
-      const ev = body.event; // {date, title, text, when, color}
-      const cal = CalendarApp.getCalendarById(CALENDAR_ID);
-      let start = ev.when ? new Date(ev.when) : new Date(ev.date + 'T09:00:00');
-      let end   = new Date(start.getTime() + 30*60*1000);
-      cal.createEvent(`${ev.title}：${ev.text}`, start, end, {description: 'from TaskCalendar v7'});
-      return json({ok:true});
-    }
-    return json({ok:false, error:'unknown action'});
-  } catch (err) {
-    return json({ok:false, error:String(err)});
+  #overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.35); z-index:500; }
+  #popupForm {
+    display:none; position:fixed; top:50%; left:50%;
+    transform: translate(-50%, -50%) scale(.95);
+    background:#fff; border:2px solid #4a90e2; padding:16px; border-radius:12px;
+    box-shadow:0 0 20px rgba(0,0,0,.35); z-index:1000; opacity:0; transition: all .2s ease;
+    width:92%; max-width:420px;
   }
+  #popupForm.show { opacity:1; transform: translate(-50%, -50%) scale(1); }
+  #popupForm input, #popupForm select { width:100%; margin:6px 0; padding:8px; font-size:13px; }
+  #popupForm .row { display:grid; grid-template-columns: 1fr 1fr; gap:8px; }
+  #popupForm button { margin-top:8px; padding:8px 10px; }
+
+  #todayTasks { background:#e9f3ff; border-radius: 10px; padding: 10px; margin: 8px 0 10px; font-size: 13px; }
+  #viewToggle { margin: 5px 0; text-align:center; }
+  #viewToggle button { margin: 2px; }
+
+  /* 設定バー */
+  #settings { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px; }
+  #settings input[type="text"] { width:260px; padding:6px; }
+  #settings input[type="password"] { width:160px; padding:6px; }
+
+  @media (max-width: 768px) {
+    th, td { height: 90px; font-size: 11px; }
+    .task-list { font-size: 10px; }
+    .add-subtask input[type="text"] { width: 100%; }
+  }
+</style>
+</head>
+<body>
+
+<h2>📅 タスクカレンダー v7</h2>
+
+<!-- 今日の予定 -->
+<div id="todayTasks"></div>
+
+<!-- 月移動・ビュー切替・設定 -->
+<div id="nav">
+  <button onclick="changeMonth(-1)">＜ 前月</button>
+  <h3 id="monthLabel"></h3>
+  <button onclick="changeMonth(1)">次月 ＞</button>
+</div>
+
+<div id="viewToggle">
+  <button onclick="switchView('month')">📆 月ビュー</button>
+  <button onclick="switchView('week')">🗓 週ビュー</button>
+</div>
+
+<div id="settings">
+  <span class="pill">GCal 同期設定</span>
+  <input type="text" id="gcalUrl" placeholder="Apps Script の WebアプリURL" />
+  <input type="password" id="gcalToken" placeholder="共有トークン" />
+  <button onclick="saveSyncSettings()">保存</button>
+  <button onclick="pullFromGCal()">GCal → 取込</button>
+</div>
+
+<div id="calendar"></div>
+
+<!-- 追加ポップアップ -->
+<div id="overlay" onclick="closePopup()"></div>
+<div id="popupForm" role="dialog" aria-modal="true">
+  <h3>新規タイトル追加フォーム</h3>
+  <label>日付</label>
+  <input type="text" id="popupDate" readonly>
+  <div class="row">
+    <div>
+      <label>タイトル</label>
+      <input type="text" id="popupTitle" placeholder="例：業務スーパー">
+    </div>
+    <div>
+      <label>カテゴリ色</label>
+      <select id="popupColor">
+        <option value="#4a90e2">青（仕事）</option>
+        <option value="#2ecc71">緑（買い物）</option>
+        <option value="#f39c12">オレンジ（趣味）</option>
+        <option value="#9b59b6">紫（学習）</option>
+        <option value="#e74c3c">赤（重要）</option>
+      </select>
+    </div>
+  </div>
+  <label>サブタスク</label>
+  <input type="text" id="popupItem" placeholder="例：牛乳を買う">
+  <label>リマインド時刻（任意）</label>
+  <input type="datetime-local" id="popupWhen">
+  <button onclick="submitPopup()">＋追加</button>
+  <button onclick="closePopup()">閉じる</button>
+</div>
+
+<script>
+/* ====== データ永続化 ====== */
+let data     = JSON.parse(localStorage.getItem("calendarData"))    || {};
+let expanded = JSON.parse(localStorage.getItem("expandedTitles"))  || {};
+let colors   = JSON.parse(localStorage.getItem("titleColors"))     || {};
+let remindDB = JSON.parse(localStorage.getItem("reminders"))       || {}; // {id:{date,title,text,when,done}}
+let syncCfg  = JSON.parse(localStorage.getItem("syncCfg"))         || {url:"", token:""};
+
+let currentYear = new Date().getFullYear();
+let currentMonth = new Date().getMonth();
+let currentView = "month";
+let selectedDate = null;
+
+function saveData() {
+  localStorage.setItem("calendarData", JSON.stringify(data));
+  localStorage.setItem("expandedTitles", JSON.stringify(expanded));
+  localStorage.setItem("titleColors", JSON.stringify(colors));
+  localStorage.setItem("reminders", JSON.stringify(remindDB));
+  localStorage.setItem("syncCfg", JSON.stringify(syncCfg));
 }
 
-function doGet(e){
+/* ====== カレンダー描画 ====== */
+function renderCalendar(year, month) {
+  const cal = document.getElementById("calendar");
+  cal.innerHTML = "";
+  document.getElementById("monthLabel").textContent = `${year}年 ${month + 1}月`;
+
+  const table = document.createElement("table");
+  const headRow = document.createElement("tr");
+  ["日","月","火","水","木","金","土"].forEach(d => {
+    const th = document.createElement("th"); th.textContent = d; headRow.appendChild(th);
+  });
+  table.appendChild(headRow);
+
+  const first = new Date(year, month, 1);
+  const last  = new Date(year, month+1, 0);
+  const startW = first.getDay();
+  const total = last.getDate();
+
+  let startDate = 1;
+  if (currentView === "week") {
+    const today = new Date(year, month, new Date().getDate());
+    const diff = today.getDate() - today.getDay();
+    startDate = Math.max(1, diff);
+  }
+  let date = startDate;
+  const endDate = (currentView === "week") ? Math.min(total, startDate + 6) : total;
+
+  for (let i=0; i<6 && date<=endDate; i++){
+    const row = document.createElement("tr");
+    for (let j=0; j<7 && date<=endDate; j++){
+      const cell = document.createElement("td");
+      const key = `${year}-${String(month+1).padStart(2,"0")}-${String(date).padStart(2,"0")}`;
+
+      cell.onclick = (e)=>{
+        if (!["INPUT","BUTTON","SPAN","SELECT"].includes(e.target.tagName)) openPopup(key);
+      };
+      const t = new Date();
+      if (t.getFullYear()===year && t.getMonth()===month && t.getDate()===date) cell.setAttribute("data-today","true");
+
+      const label = document.createElement("div");
+      label.className = "date-number"; label.textContent = date; cell.appendChild(label);
+
+      if (data[key]){
+        Object.keys(data[key]).forEach(title=>{
+          const col = colors[title] || "#4a90e2";
+          const ttl = document.createElement("div");
+          ttl.className="title"; ttl.style.background=col; ttl.title="クリックで展開 / 右クリックで削除";
+
+          // 進捗バー
+          const totalTasks = data[key][title].length;
+          const doneTasks  = data[key][title].filter(x=>x.done).length;
+          const rate = totalTasks? Math.round(100*doneTasks/totalTasks):0;
+
+          const nameSpan = document.createElement("span");
+          nameSpan.textContent = title;
+
+          const prog = document.createElement("div"); prog.className="progress";
+          const bar = document.createElement("span"); bar.style.width = rate+"%"; prog.appendChild(bar);
+
+          const pct = document.createElement("span"); pct.className="pill"; pct.textContent=rate+"%";
+          ttl.appendChild(nameSpan); ttl.appendChild(prog); ttl.appendChild(pct);
+
+          const list = document.createElement("div"); list.className="task-list";
+          const open = expanded[key]?.includes(title); list.style.display = open?"block":"none";
+
+          // タスク列
+          data[key][title].forEach((task, idx)=>{
+            const item = document.createElement("div"); item.className="task-item";
+            if (task.done) item.classList.add("done");
+
+            const cb = document.createElement("input"); cb.type="checkbox"; cb.checked=task.done;
+            cb.onchange=()=>{ task.done=cb.checked; saveData(); renderCalendar(currentYear,currentMonth); };
+
+            const label = document.createElement("span"); label.textContent = task.text;
+
+            // 編集
+            label.onclick=()=>{
+              const nt = prompt("サブタスク編集", task.text);
+              if (nt && nt.trim()!==""){ task.text = nt.trim(); saveData(); renderCalendar(currentYear,currentMonth); }
+            };
+            // 右クリック削除（PC）
+            label.oncontextmenu=(e)=>{
+              e.preventDefault();
+              if (confirm("このサブタスクを削除しますか？")){
+                data[key][title].splice(idx,1);
+                if (!data[key][title].length) delete data[key][title];
+                if (!Object.keys(data[key]).length) delete data[key];
+                // リマインダー消去
+                if (task.rid && remindDB[task.rid]) delete remindDB[task.rid];
+                saveData(); renderCalendar(currentYear,currentMonth);
+              }
+            };
+            // 長押し削除（スマホ）
+            let pressTimer;
+            label.addEventListener("touchstart", ()=>{ pressTimer=setTimeout(()=>{ if(confirm("このサブタスクを削除しますか？")){
+                data[key][title].splice(idx,1);
+                if (!data[key][title].length) delete data[key][title];
+                if (!Object.keys(data[key]).length) delete data[key];
+                if (task.rid && remindDB[task.rid]) delete remindDB[task.rid];
+                saveData(); renderCalendar(currentYear,currentMonth);
+            }}, 800); });
+            label.addEventListener("touchend", ()=>clearTimeout(pressTimer));
+
+            // リマインド時刻表示
+            const when = document.createElement("div"); when.className="task-when";
+            if (task.when) when.textContent = "⏰ " + task.when.replace("T"," ");
+
+            item.appendChild(cb); item.appendChild(label); item.appendChild(when);
+            list.appendChild(item);
+          });
+
+          // 追加行
+          const add = document.createElement("div"); add.className="add-subtask";
+          const itxt = document.createElement("input"); itxt.type="text"; itxt.placeholder="＋ サブタスク";
+          const iwhen = document.createElement("input"); iwhen.type="datetime-local"; iwhen.title="通知したい時刻（任意）";
+          const btn = document.createElement("button"); btn.textContent="＋";
+          btn.onclick=(ev)=>{
+            ev.stopPropagation();
+            const txt = itxt.value.trim(); if (!txt) return;
+            const obj = {text:txt, done:false};
+            if (iwhen.value) {
+              obj.when = iwhen.value;
+              obj.rid  = scheduleReminder(key, title, txt, iwhen.value);
+            }
+            data[key][title] = data[key][title] || [];
+            data[key][title].push(obj);
+            itxt.value=""; iwhen.value="";
+            saveData(); renderCalendar(currentYear,currentMonth);
+            // GCalへ反映（設定があれば）
+            autoSyncCreate(key, title, obj);
+          };
+          add.appendChild(itxt); add.appendChild(iwhen); add.appendChild(btn);
+          list.appendChild(add);
+
+          // タイトル開閉・削除
+          ttl.onclick=(e)=>{
+            e.stopPropagation();
+            const o = list.style.display==="block";
+            list.style.display = o?"none":"block";
+            if (!expanded[key]) expanded[key]=[];
+            if (o) expanded[key]=expanded[key].filter(v=>v!==title); else expanded[key].push(title);
+            saveData();
+          };
+          ttl.oncontextmenu=(e)=>{
+            e.preventDefault();
+            if (confirm("このタイトルと全タスクを削除しますか？")){
+              // 付随リマインダー削除
+              (data[key][title]||[]).forEach(tk=>{ if (tk.rid && remindDB[tk.rid]) delete remindDB[tk.rid]; });
+              delete data[key][title];
+              if (!Object.keys(data[key]).length) delete data[key];
+              saveData(); renderCalendar(currentYear,currentMonth);
+            }
+          };
+
+          cell.appendChild(ttl);
+          cell.appendChild(list);
+        });
+      }
+
+      row.appendChild(cell); date++;
+    }
+    table.appendChild(row);
+  }
+  cal.appendChild(table);
+  renderTodayTasks();
+}
+
+/* ====== 今日の予定 ====== */
+function renderTodayTasks(){
+  const today = new Date();
+  const key = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`;
+  const box = document.getElementById("todayTasks");
+  box.innerHTML = `<b>📅 今日：${key}</b><br>`;
+  if (!data[key]){ box.innerHTML += "本日の予定はありません。"; return; }
+  Object.keys(data[key]).forEach(title=>{
+    const col = colors[title] || "#4a90e2";
+    box.innerHTML += `<span class="color-dot" style="background:${col}"></span><b>${title}</b><br>`;
+    data[key][title].forEach(t=>{ box.innerHTML += `・${t.text}${t.done ? " ✅" : ""}${t.when ? "（"+t.when.replace("T"," ")+ "）":""}<br>`; });
+  });
+}
+
+/* ====== ポップアップ ====== */
+function openPopup(date){
+  selectedDate = date;
+  document.getElementById("popupDate").value = date;
+  document.getElementById("popupTitle").value = "";
+  document.getElementById("popupItem").value  = "";
+  document.getElementById("popupWhen").value  = "";
+  document.getElementById("popupForm").classList.add("show");
+  document.getElementById("popupForm").style.display="block";
+  document.getElementById("overlay").style.display="block";
+}
+function closePopup(){
+  document.getElementById("popupForm").classList.remove("show");
+  setTimeout(()=>{ document.getElementById("popupForm").style.display="none"; document.getElementById("overlay").style.display="none"; },200);
+}
+document.addEventListener("keydown",(e)=>{ if(e.key==="Escape") closePopup(); });
+function submitPopup(){
+  const title = document.getElementById("popupTitle").value.trim();
+  const item  = document.getElementById("popupItem").value.trim();
+  const when  = document.getElementById("popupWhen").value;
+  const col   = document.getElementById("popupColor").value;
+  if (!title || !item) return alert("タイトルとサブタスクを入力してください");
+  data[selectedDate] = data[selectedDate] || {};
+  colors[title] = colors[title] || col;
+  data[selectedDate][title] = data[selectedDate][title] || [];
+  const obj = {text:item, done:false};
+  if (when){ obj.when = when; obj.rid = scheduleReminder(selectedDate, title, item, when); }
+  data[selectedDate][title].push(obj);
+  saveData(); closePopup(); renderCalendar(currentYear,currentMonth);
+  autoSyncCreate(selectedDate, title, obj);
+}
+
+/* ====== ビューと月移動 ====== */
+function changeMonth(d){ currentMonth += d; if(currentMonth<0){currentMonth=11;currentYear--} else if(currentMonth>11){currentMonth=0;currentYear++} renderCalendar(currentYear,currentMonth); }
+function switchView(m){ currentView=m; renderCalendar(currentYear,currentMonth); }
+
+/* ====== 通知（リマインダー） ====== */
+async function ensureNotifPermission(){
+  if (!("Notification" in window)) return false;
+  if (Notification.permission==="granted") return true;
+  if (Notification.permission!=="denied"){
+    const p = await Notification.requestPermission();
+    return p==="granted";
+  }
+  return false;
+}
+function scheduleReminder(date, title, text, whenISO){
+  const id = "r_"+Math.random().toString(36).slice(2);
+  remindDB[id] = {date,title,text,when:whenISO,done:false};
+  saveData();
+  return id;
+}
+// ページ起動中は1分おきにチェック
+setInterval(async ()=>{
+  const ok = await ensureNotifPermission();
+  if (!ok) return;
+  const now = new Date();
+  Object.keys(remindDB).forEach(id=>{
+    const r = remindDB[id]; if (r.done) return;
+    if (!r.when) return;
+    const t = new Date(r.when);
+    if (t <= now){
+      new Notification("⏰ リマインダー", { body:`${r.date} ${r.title} / ${r.text}` });
+      r.done = true; saveData();
+    }
+  });
+}, 60000);
+
+/* ====== Googleカレンダー同期 ====== */
+/* 方式：Apps Script（後述）にPOST/GETする軽量API。
+   - 自動反映：新規作成時に create をPOST
+   - 取込：pullFromGCal() 実行で範囲のイベントを取り込み
+*/
+function saveSyncSettings(){
+  const url = document.getElementById("gcalUrl").value.trim();
+  const token = document.getElementById("gcalToken").value.trim();
+  syncCfg = {url, token}; saveData();
+  alert("同期設定を保存しました");
+}
+function cfgPresent(){ return syncCfg.url && syncCfg.token; }
+
+async function autoSyncCreate(date, title, task){
+  if (!cfgPresent()) return; // 未設定なら何もしない
   try{
-    const p = e.parameter;
-    if (p.token !== SHARED_TOKEN) return json({ok:false, error:'forbidden'});
-    if (p.action === 'list'){
-      const since = new Date(p.since);
-      const until = new Date(p.until);
-      const cal = CalendarApp.getCalendarById(CALENDAR_ID);
-      const events = cal.getEvents(since, until);
-      const out = events.map(ev=>{
-        const start = ev.getStartTime();
-        const dateKey = Utilities.formatDate(start, Session.getScriptTimeZone(), 'yyyy-MM-dd');
-        const whenISO = Utilities.formatDate(start, Session.getScriptTimeZone(), "yyyy-MM-dd'T'HH:mm");
-        return {date: dateKey, title: ev.getTitle().split('：')[0], text: ev.getTitle().split('：')[1] || ev.getTitle(), when: whenISO};
-      });
-      return json(out);
-    }
-    return json({ok:false, error:'unknown action'});
-  }catch(err){
-    return json({ok:false, error:String(err)});
+    const payload = { action:"create", token: syncCfg.token, event:{
+      date, title, text: task.text, when: task.when || null, color: colors[title] || "#4a90e2"
+    }};
+    await fetch(syncCfg.url, {method:"POST", mode:"cors", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
+  }catch(e){ console.warn("GCal create failed", e); }
+}
+
+// 直近±30日のイベントを吸い上げて同日タイトルとして取り込み（簡易）
+async function pullFromGCal(){
+  if (!cfgPresent()) return alert("まず WebアプリURL と トークンを設定してください。");
+  try{
+    const since = new Date(); since.setDate(since.getDate()-30);
+    const until = new Date(); until.setDate(until.getDate()+30);
+    const q = `?action=list&token=${encodeURIComponent(syncCfg.token)}&since=${since.toISOString()}&until=${until.toISOString()}`;
+    const res = await fetch(syncCfg.url + q, {method:"GET", mode:"cors"});
+    const list = await res.json(); // [{date,title,text,when}]
+    list.forEach(ev=>{
+      data[ev.date] = data[ev.date] || {};
+      const ttl = ev.title || "Google予定";
+      data[ev.date][ttl] = data[ev.date][ttl] || [];
+      // 重複チェック（同テキスト・時刻）
+      const dup = data[ev.date][ttl].some(x=>x.text===ev.text && (x.when||"") === (ev.when||""));
+      if (!dup){
+        const obj = {text:ev.text, done:false};
+        if (ev.when){ obj.when = ev.when; obj.rid = scheduleReminder(ev.date, ttl, ev.text, ev.when); }
+        data[ev.date][ttl].push(obj);
+      }
+      if (!colors[ttl]) colors[ttl] = "#4a90e2";
+    });
+    saveData(); renderCalendar(currentYear,currentMonth);
+    alert("Googleカレンダーから取込完了");
+  }catch(e){
+    console.error(e); alert("取込に失敗しました。CORS/URL/トークン設定を確認してください。");
   }
 }
 
-function json(obj){
-  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
-}
-
+/* ====== 初期化 ====== */
+window.onload = ()=>{
+  // 設定欄へ反映
+  document.getElementById("gcalUrl").value = syncCfg.url || "";
+  document.getElementById("gcalToken").value = syncCfg.token || "";
+  renderCalendar(currentYear, currentMonth);
+  ensureNotifPermission();
+};
+</script>
+</body>
+</html>
