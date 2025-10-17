@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>タスクカレンダー v6.1（スマホ＋カラー＋週ビュー＋削除対応）</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  body { font-family: "Segoe UI", sans-serif; margin: 10px; background: #f9f9f9; }
+  h2 { text-align: center; }
+  #nav { display: flex; justify-content: space-between; align-items: center; margin: 5px 0; flex-wrap: wrap; }
+  table { border-collapse: collapse; width: 100%; table-layout: fixed; }
+  th, td { border: 1px solid #ccc; width: 14.28%; vertical-align: top; height: 100px; position: relative; background: #fff; cursor: pointer; }
+  th { background: #f1f1f1; }
+  td[data-today="true"] { background: #fffbe0; }
+  .date-number { position: absolute; top: 4px; right: 4px; font-size: 12px; color: #555; }
+  .title { margin: 2px; padding: 2px 4px; border-radius: 4px; font-size: 11px; color: #fff; cursor: pointer; }
+  .task-list { margin-left: 8px; font-size: 10px; display: none; }
+  .task-item { display: flex; align-items: center; margin: 1px 0; }
+  .task-item.done span { text-decoration: line-through; color: gray; }
+  .add-subtask { margin-top: 3px; }
+  .add-subtask input { width: 60%; font-size: 10px; padding: 2px; }
+  .add-subtask button { font-size: 10px; margin-left: 3px; }
+  .color-dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; margin-right: 5px; vertical-align: middle; }
+
+  /* ポップアップ */
+  #overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.3); z-index: 500; }
+  #popupForm {
+    display: none; position: fixed; top: 50%; left: 50%;
+    transform: translate(-50%, -50%) scale(0.95);
+    background: #fff; border: 2px solid #4a90e2; padding: 15px;
+    border-radius: 10px; box-shadow: 0 0 15px rgba(0,0,0,0.3);
+    z-index: 1000; opacity: 0; transition: all 0.25s ease;
+    width: 90%; max-width: 350px;
+  }
+  #popupForm.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  #popupForm input, select { margin: 5px; padding: 5px; font-size: 12px; width: 90%; }
+  #popupForm button { margin: 5px; padding: 5px 10px; }
+
+  /* 今日の予定 */
+  #todayTasks { background: #e9f3ff; border-radius: 8px; padding: 10px; margin-bottom: 10px; font-size: 13px; }
+
+  /* 週ビュー切替 */
+  #viewToggle { margin: 5px 0; text-align: center; }
+  #viewToggle button { margin: 2px; }
+
+  /* スマホ対応 */
+  @media (max-width: 768px) {
+    th, td { height: 80px; font-size: 11px; }
+    .task-list { font-size: 9px; }
+    .add-subtask input { width: 70%; }
+  }
+</style>
+</head>
+<body>
+
+<h2>?? タスクカレンダー v6.1</h2>
+
+<div id="todayTasks"></div>
+
+<div id="nav">
+  <button onclick="changeMonth(-1)">＜ 前月</button>
+  <h3 id="monthLabel"></h3>
+  <button onclick="changeMonth(1)">次月 ＞</button>
+</div>
+
+<div id="viewToggle">
+  <button onclick="switchView('month')">?? 月ビュー</button>
+  <button onclick="switchView('week')">?? 週ビュー</button>
+</div>
+
+<div id="calendar"></div>
+
+<!-- ポップアップ -->
+<div id="overlay" onclick="closePopup()"></div>
+<div id="popupForm">
+  <h3>新規タイトル追加フォーム</h3>
+  <label>日付：</label><input type="text" id="popupDate" readonly><br>
+  <label>タイトル：</label><input type="text" id="popupTitle" placeholder="例：業務スーパー"><br>
+  <label>サブタスク：</label><input type="text" id="popupItem" placeholder="例：牛乳を買う"><br>
+  <label>カテゴリ色：</label>
+  <select id="popupColor">
+    <option value="#4a90e2">青（仕事）</option>
+    <option value="#2ecc71">緑（買い物）</option>
+    <option value="#f39c12">オレンジ（趣味）</option>
+    <option value="#9b59b6">紫（学習）</option>
+    <option value="#e74c3c">赤（重要）</option>
+  </select><br>
+  <button onclick="submitPopup()">＋追加</button>
+  <button onclick="closePopup()">閉じる</button>
+</div>
+
+<script>
+let data = JSON.parse(localStorage.getItem("calendarData")) || {};
+let expanded = JSON.parse(localStorage.getItem("expandedTitles")) || {};
+let colors = JSON.parse(localStorage.getItem("titleColors")) || {};
+let currentYear = new Date().getFullYear();
+let currentMonth = new Date().getMonth();
+let currentView = "month";
+let selectedDate = null;
+
+function saveData() {
+  localStorage.setItem("calendarData", JSON.stringify(data));
+  localStorage.setItem("expandedTitles", JSON.stringify(expanded));
+  localStorage.setItem("titleColors", JSON.stringify(colors));
+}
+
+function renderCalendar(year, month) {
+  const calendarDiv = document.getElementById("calendar");
+  calendarDiv.innerHTML = "";
+  document.getElementById("monthLabel").textContent = `${year}年 ${month + 1}月`;
+
+  const table = document.createElement("table");
+  const weekdays = ["日", "月", "火", "水", "木", "金", "土"];
+  const headerRow = document.createElement("tr");
+  weekdays.forEach(day => {
+    const th = document.createElement("th");
+    th.textContent = day;
+    headerRow.appendChild(th);
+  });
+  table.appendChild(headerRow);
+
+  const firstDay = new Date(year, month, 1);
+  const lastDay = new Date(year, month + 1, 0);
+  const startWeek = firstDay.getDay();
+  const totalDays = lastDay.getDate();
+
+  let startDate = 1;
+  if (currentView === "week") {
+    const today = new Date();
+    const diff = today.getDate() - today.getDay();
+    startDate = Math.max(1, diff);
+  }
+
+  let date = startDate;
+  const endDay = (currentView === "week") ? Math.min(totalDays, startDate + 6) : totalDays;
+
+  for (let i = 0; i < 6 && date <= endDay; i++) {
+    const row = document.createElement("tr");
+    for (let j = 0; j < 7 && date <= endDay; j++) {
+      const cell = document.createElement("td");
+      const fullDate = `${year}-${String(month + 1).padStart(2,"0")}-${String(date).padStart(2,"0")}`;
+      cell.onclick = (e) => {
+        if (e.target.tagName !== "INPUT" && e.target.tagName !== "BUTTON" && e.target.tagName !== "SPAN") {
+          openPopup(fullDate);
+        }
+      };
+
+      const today = new Date();
+      if (today.getFullYear() === year && today.getMonth() === month && today.getDate() === date) {
+        cell.setAttribute("data-today", "true");
+      }
+
+      const dateLabel = document.createElement("div");
+      dateLabel.className = "date-number";
+      dateLabel.textContent = date;
+      cell.appendChild(dateLabel);
+
+      if (data[fullDate]) {
+        Object.keys(data[fullDate]).forEach(title => {
+          const color = colors[title] || "#4a90e2";
+          const titleDiv = document.createElement("div");
+          titleDiv.className = "title";
+          titleDiv.textContent = title;
+          titleDiv.style.background = color;
+
+          titleDiv.oncontextmenu = (e) => {
+            e.preventDefault();
+            if (confirm("このタイトルを削除しますか？")) {
+              delete data[fullDate][title];
+              if (Object.keys(data[fullDate]).length === 0) delete data[fullDate];
+              saveData();
+              renderCalendar(currentYear, currentMonth);
+            }
+          };
+
+          const taskList = document.createElement("div");
+          taskList.className = "task-list";
+          const isOpen = expanded[fullDate]?.includes(title);
+          taskList.style.display = isOpen ? "block" : "none";
+
+          data[fullDate][title].forEach((task, index) => {
+            const itemDiv = document.createElement("div");
+            itemDiv.className = "task-item";
+            if (task.done) itemDiv.classList.add("done");
+
+            const checkbox = document.createElement("input");
+            checkbox.type = "checkbox";
+            checkbox.checked = task.done;
+            checkbox.onchange = () => {
+              task.done = checkbox.checked;
+              saveData();
+              renderCalendar(currentYear, currentMonth);
+            };
+
+            const span = document.createElement("span");
+            span.textContent = task.text;
+
+            // ? 編集
+            span.onclick = () => {
+              const newText = prompt("サブタスクを編集:", task.text);
+              if (newText && newText.trim() !== "") {
+                task.text = newText.trim();
+                saveData();
+                renderCalendar(currentYear, currentMonth);
+              }
+            };
+
+            // ? 右クリック削除（PC）
+            span.oncontextmenu = (e) => {
+              e.preventDefault();
+              if (confirm("このサブタスクを削除しますか？")) {
+                data[fullDate][title].splice(index, 1);
+                if (data[fullDate][title].length === 0) delete data[fullDate][title];
+                if (Object.keys(data[fullDate]).length === 0) delete data[fullDate];
+                saveData();
+                renderCalendar(currentYear, currentMonth);
+              }
+            };
+
+            // ? 長押し削除（スマホ）
+            let pressTimer;
+            span.addEventListener("touchstart", () => {
+              pressTimer = setTimeout(() => {
+                if (confirm("このサブタスクを削除しますか？")) {
+                  data[fullDate][title].splice(index, 1);
+                  if (data[fullDate][title].length === 0) delete data[fullDate][title];
+                  if (Object.keys(data[fullDate]).length === 0) delete data[fullDate];
+                  saveData();
+                  renderCalendar(currentYear, currentMonth);
+                }
+              }, 1000);
+            });
+            span.addEventListener("touchend", () => clearTimeout(pressTimer));
+
+            itemDiv.appendChild(checkbox);
+            itemDiv.appendChild(span);
+            taskList.appendChild(itemDiv);
+          });
+
+          const addDiv = document.createElement("div");
+          addDiv.className = "add-subtask";
+          const input = document.createElement("input");
+          input.placeholder = "＋ サブタスク追加";
+          const btn = document.createElement("button");
+          btn.textContent = "＋";
+          btn.onclick = (ev) => {
+            ev.stopPropagation();
+            const txt = input.value.trim();
+            if (!txt) return;
+            data[fullDate][title].push({ text: txt, done: false });
+            input.value = "";
+            saveData();
+            renderCalendar(currentYear, currentMonth);
+          };
+          addDiv.appendChild(input);
+          addDiv.appendChild(btn);
+          taskList.appendChild(addDiv);
+
+          titleDiv.onclick = (e) => {
+            e.stopPropagation();
+            const open = taskList.style.display === "block";
+            taskList.style.display = open ? "none" : "block";
+            if (!expanded[fullDate]) expanded[fullDate] = [];
+            if (open) expanded[fullDate] = expanded[fullDate].filter(t => t !== title);
+            else expanded[fullDate].push(title);
+            saveData();
+          };
+
+          cell.appendChild(titleDiv);
+          cell.appendChild(taskList);
+        });
+      }
+
+      row.appendChild(cell);
+      date++;
+    }
+    table.appendChild(row);
+  }
+
+  calendarDiv.appendChild(table);
+  renderTodayTasks();
+}
+
+function openPopup(date) {
+  selectedDate = date;
+  document.getElementById("popupDate").value = date;
+  document.getElementById("popupForm").classList.add("show");
+  document.getElementById("popupForm").style.display = "block";
+  document.getElementById("overlay").style.display = "block";
+}
+function closePopup() {
+  document.getElementById("popupForm").classList.remove("show");
+  setTimeout(() => {
+    document.getElementById("popupForm").style.display = "none";
+    document.getElementById("overlay").style.display = "none";
+  }, 200);
+}
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closePopup(); });
+
+function submitPopup() {
+  const title = document.getElementById("popupTitle").value.trim();
+  const item = document.getElementById("popupItem").value.trim();
+  const color = document.getElementById("popupColor").value;
+  if (!title || !item) return alert("タイトルとサブタスクを入力してください");
+  if (!data[selectedDate]) data[selectedDate] = {};
+  if (!data[selectedDate][title]) data[selectedDate][title] = [];
+  data[selectedDate][title].push({ text: item, done: false });
+  colors[title] = color;
+  saveData();
+  closePopup();
+  renderCalendar(currentYear, currentMonth);
+}
+
+function changeMonth(delta) {
+  currentMonth += delta;
+  if (currentMonth < 0) { currentMonth = 11; currentYear--; }
+  else if (currentMonth > 11) { currentMonth = 0; currentYear++; }
+  renderCalendar(currentYear, currentMonth);
+}
+
+function switchView(mode) {
+  currentView = mode;
+  renderCalendar(currentYear, currentMonth);
+}
+
+function renderTodayTasks() {
+  const today = new Date();
+  const dateKey = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`;
+  const div = document.getElementById("todayTasks");
+  div.innerHTML = `<b>?? 今日：${dateKey}</b><br>`;
+  if (!data[dateKey]) {
+    div.innerHTML += "本日の予定はありません。";
+    return;
+  }
+  Object.keys(data[dateKey]).forEach(title => {
+    const color = colors[title] || "#4a90e2";
+    div.innerHTML += `<span class="color-dot" style="background:${color}"></span><b>${title}</b><br>`;
+    data[dateKey][title].forEach(t => {
+      div.innerHTML += `・${t.text}${t.done ? " ?" : ""}<br>`;
+    });
+  });
+}
+
+window.onload = () => renderCalendar(currentYear, currentMonth);
+</script>
+
+</body>
+</html>
